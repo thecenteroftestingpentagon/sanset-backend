@@ -1,0 +1,604 @@
+Nice — below is a complete, developer-ready **backend documentation** for **Sanset** (FastAPI). Drop this into your Replit project (or any host) and it’ll guide devs through the API, data models, auth, DB layout, background jobs, deployment hints, and examples (curl / JSON). I kept it practical so you can copy/paste into your repo as `backend/README.md` or into Replit’s description.
+
+---
+
+# Sanset — Backend Documentation (FastAPI)
+
+**Stack / Purpose**
+
+* Backend framework: **FastAPI** (Python)
+* Auth: **JWT** (access + refresh tokens)
+* DB: **PostgreSQL** (production) / **SQLite** (dev)
+* ORM: **SQLAlchemy + Alembic** (migrations)
+* AI: Lightweight Python models (Scikit-learn / TF Lite) served inside backend or by an internal microservice
+* Background tasks: FastAPI `BackgroundTasks` + APScheduler for periodic retraining / cleanup
+* API docs: automatically available at `/docs` (Swagger UI) and `/redoc` (ReDoc)
+
+---
+
+## Project layout (suggested)
+
+```
+/sanset/backend
+├── app/
+│   ├── main.py                # FastAPI app + startup/shutdown events
+│   ├── core/
+│   │   ├── config.py          # pydantic settings from env
+│   │   ├── security.py        # jwt utils, password hashing
+│   │   └── tasks.py           # background task helpers
+│   ├── api/
+│   │   ├── deps.py            # common dependencies
+│   │   ├── v1/
+│   │   │   ├── auth.py
+│   │   │   ├── users.py
+│   │   │   ├── products.py
+│   │   │   ├── search.py
+│   │   │   ├── recommend.py
+│   │   │   ├── cart.py
+│   │   │   └── orders.py
+│   ├── crud/                  # DB CRUD helpers
+│   ├── models/                # SQLAlchemy models
+│   ├── schemas/               # Pydantic request/response schemas
+│   ├── db/
+│   │   ├── base.py
+│   │   ├── session.py
+│   │   └── alembic/           # migrations
+│   └── ml/                    # model training, inference utils
+├── requirements.txt
+├── Dockerfile
+└── README.md
+```
+
+---
+
+## Environment / Config (example)
+
+Set these in Replit secrets or environment settings:
+
+```
+SECRET_KEY=supersecret_very_long_random_string
+DATABASE_URL=postgresql://user:pass@host:port/dbname   # or sqlite:///./dev.db
+ACCESS_TOKEN_EXPIRE_MINUTES=60
+REFRESH_TOKEN_EXPIRE_MINUTES=43200
+ALGORITHM=HS256
+PORT=8000
+SENTRY_DSN=                         # optional
+```
+
+`app/core/config.py` should use Pydantic `BaseSettings` to load env vars.
+
+---
+
+## Key Models (Pydantic / SQLAlchemy - summary)
+
+### Pydantic (request/response) — examples
+
+```py
+# app/schemas/user.py
+class UserCreate(BaseModel):
+    full_name: str
+    email: EmailStr
+    phone: str
+    password: constr(min_length=8)
+
+class UserOut(BaseModel):
+    id: int
+    full_name: str
+    email: EmailStr
+    phone: str
+    is_active: bool
+```
+
+```py
+# app/schemas/product.py
+class ProductBase(BaseModel):
+    name: str
+    description: Optional[str]
+    category: str
+    price: float
+    stock: int
+    image_url: Optional[str]
+
+class ProductOut(ProductBase):
+    id: int
+    created_at: datetime
+```
+
+```py
+# app/schemas/recommend.py
+class RecommendationItem(BaseModel):
+    product_id: int
+    score: float
+
+class RecommendationResponse(BaseModel):
+    user_id: int
+    recommendations: List[RecommendationItem]
+```
+
+### DB Schema (high-level)
+
+**users**: id, full_name, email (unique), phone, hashed_password, is_active, created_at.
+**products**: id, name, slug, category, description, price, stock, image_url, created_at, updated_at.
+**orders**: id, user_id, total_amount, status, placed_at, delivery_eta, address_id.
+**order_items**: id, order_id, product_id, qty, price_at_purchase.
+**carts**: user_id, items (json or normalized table cart_items).
+**recommendations_log**: id, user_id, recommended_products (json), context, timestamp.
+**addresses**: id, user_id, label, address_line, lat, lng, pincode.
+**events** (optional analytic table): user_id, event_type, meta(json), timestamp.
+
+---
+
+## Authentication & Security
+
+* Password hashing: **bcrypt / passlib**.
+* JWT tokens: issue **access token** (short-lived) + **refresh token** (longer) using `SECRET_KEY` and `ALGORITHM`.
+* Protect routes with dependency that verifies JWT and optionally scopes/roles (user/admin).
+* Use HTTPS in production; enable CORS restricted to your frontend origin.
+* Rate limiting endpoints (e.g., auth, search) is recommended; use `slowapi` (Starlette compatible) or an API gateway.
+
+---
+
+## API Endpoints (v1) — Overview + examples
+
+> All responses in JSON. Errors use `{ "detail": "message" }` and standard HTTP codes.
+
+### Auth
+
+#### POST `/api/v1/auth/register`
+
+Create a new user.
+
+Request:
+
+```json
+{
+  "full_name": "Om Choksi",
+  "email": "om@example.com",
+  "phone": "+919999999999",
+  "password": "strongPass123"
+}
+```
+
+Response `201 Created`:
+
+```json
+{
+  "id": 12,
+  "full_name": "Om Choksi",
+  "email": "om@example.com",
+  "phone": "+919999999999",
+  "is_active": true
+}
+```
+
+Errors: `400` if email exists.
+
+---
+
+#### POST `/api/v1/auth/login`
+
+Exchange credentials for tokens.
+
+Request:
+
+```json
+{
+  "email": "om@example.com",
+  "password": "strongPass123"
+}
+```
+
+Response:
+
+```json
+{
+  "access_token": "eyJ...abc",
+  "token_type": "bearer",
+  "expires_in": 3600,
+  "refresh_token": "eyJ...refresh"
+}
+```
+
+---
+
+#### POST `/api/v1/auth/refresh`
+
+Request body: `{ "refresh_token": "..." }`
+Returns new access token.
+
+---
+
+### Users
+
+#### GET `/api/v1/users/me`  (protected)
+
+Returns current user profile.
+
+Response:
+
+```json
+{
+  "id": 12,
+  "full_name": "Om Choksi",
+  "email": "om@example.com",
+  "phone": "+919999999999",
+  "is_active": true,
+  "preferences": {
+     "diet": "veg",
+     "delivery": "express"
+  }
+}
+```
+
+#### PUT `/api/v1/users/me`  (protected)
+
+Update profile or preferences.
+
+---
+
+### Products
+
+#### GET `/api/v1/products`
+
+Query params: `?q=&category=&page=1&size=20&sort=price_asc`
+
+Response:
+
+```json
+{
+  "total": 123,
+  "page": 1,
+  "size": 20,
+  "items": [
+    { "id": 34, "name": "Whole Wheat Bread", "category":"Bakery", "price": 40.0, "stock": 50, "image_url": "..." }
+  ]
+}
+```
+
+#### GET `/api/v1/products/{product_id}`
+
+Single product detail.
+
+#### POST `/api/v1/products`  (admin)
+
+Create product (multipart/form-data allowed for image upload)
+
+---
+
+### Search & Suggestions
+
+#### GET `/api/v1/search`
+
+Params: `q`, `category`, `limit`, `location`
+Supports fuzzy and typeahead suggestions.
+
+#### GET `/api/v1/search/suggestions?q=bre`
+
+Returns array of suggested tokens (`["bread", "breakfast loaf"]`).
+
+---
+
+### Recommendation
+
+#### GET `/api/v1/recommend/{user_id}`
+
+Return personalized recommendations for a user.
+
+Response:
+
+```json
+{
+  "user_id": 12,
+  "recommendations": [
+    { "product_id": 21, "score": 0.94 },
+    { "product_id": 9, "score": 0.82 }
+  ]
+}
+```
+
+Notes:
+
+* If user not found, `404`.
+* Can accept `?context=homepage` or `?context=cart` to adapt output.
+
+---
+
+### Cart
+
+#### GET `/api/v1/cart`  (protected)
+
+Fetch current user's cart.
+
+Response:
+
+```json
+{
+  "user_id": 12,
+  "items": [
+    { "product_id": 21, "qty": 2, "price": 40.0 }
+  ],
+  "total": 80.0
+}
+```
+
+#### POST `/api/v1/cart/add`  (protected)
+
+Request:
+
+```json
+{ "product_id": 21, "qty": 1 }
+```
+
+#### POST `/api/v1/cart/remove`  (protected)
+
+Request:
+
+```json
+{ "product_id": 21 }
+```
+
+---
+
+### Orders
+
+#### POST `/api/v1/orders/checkout`  (protected)
+
+Initiates checkout, reserves stock, computes ETA, and returns payment info.
+
+Request:
+
+```json
+{
+  "payment_method": "UPI",
+  "address_id": 5,
+  "coupon_code": "SAVE20"
+}
+```
+
+Response:
+
+```json
+{
+  "order_id": 1001,
+  "status": "placed",
+  "total_amount": 279.5,
+  "payment_url": "https://payment.gateway/...",
+  "placed_at": "2025-11-09T12:33:45Z",
+  "delivery_eta": "2025-11-09T13:05:00Z"
+}
+```
+
+#### GET `/api/v1/orders/{order_id}`  (protected)
+
+Order status and items.
+
+---
+
+### Admin & Analytics (protected + role=admin)
+
+* GET `/api/v1/admin/sales?range=last_30_days`
+* POST `/api/v1/admin/products/bulk-upload` (CSV)
+* GET `/api/v1/admin/stock/low` (low-stock alerts)
+
+---
+
+## Recommendation Engine — integration details
+
+### Inference path (simple)
+
+* API `GET /recommend/{user_id}` → `app.ml.recommender.get_recommendations(user_id, context)`
+* Recommender uses:
+
+  * user purchase history (last N orders)
+  * co-purchase graph (precomputed)
+  * content-based similarity (product TF-IDF on title/description)
+  * trending boosts (location + recency)
+* Scores normalized to [0,1], return top-K.
+
+### Retraining
+
+* Periodic retrain job (APScheduler daily) to recompute co-purchase associations & update model files.
+* Use light models to keep CPU low (Scikit-learn or matrix factorization with implicit).
+* Store model files under `/app/ml/models/`.
+
+---
+
+## Background Tasks & Scheduling
+
+* Use `APScheduler` or `fastapi-utils` for scheduled tasks (daily retrain, cache warm-up).
+* For on-demand long-running tasks (e.g., heavy retrain), push a job to a queue (Redis + RQ / Celery). For a small Replit demo, run retrain in background and restrict frequency.
+
+Example (FastAPI BackgroundTasks):
+
+```py
+from fastapi import BackgroundTasks
+
+@app.post("/admin/retrain")
+def retrain(background_tasks: BackgroundTasks):
+    background_tasks.add_task(run_retrain)
+    return {"status":"retrain_started"}
+```
+
+---
+
+## Error handling & status codes
+
+* `200 OK` — success read ops
+* `201 Created` — resource created
+* `204 No Content` — success/no body (e.g., delete)
+* `400 Bad Request` — invalid input
+* `401 Unauthorized` — missing/invalid token
+* `403 Forbidden` — insufficient permissions
+* `404 Not Found` — resource not found
+* `409 Conflict` — duplicate resource (email/product slug)
+* `500 Internal Server Error` — unexpected failure (log + monitor)
+
+---
+
+## Sample curl flows
+
+Register → Login → Get recommendations:
+
+```bash
+# Register
+curl -X POST https://your-host/api/v1/auth/register -H "Content-Type: application/json" \
+ -d '{"full_name":"Om","email":"om@example.com","phone":"+9199...","password":"secret123"}'
+
+# Login
+curl -X POST https://your-host/api/v1/auth/login -H "Content-Type: application/json" \
+ -d '{"email":"om@example.com","password":"secret123"}'
+
+# Suppose you get access_token=eyJ...
+curl -H "Authorization: Bearer eyJ..." https://your-host/api/v1/recommend/12
+```
+
+---
+
+## FastAPI Example — auth dependency snippet
+
+```py
+# app/core/security.py
+from jose import jwt, JWTError
+def create_access_token(data: dict, expires_delta: timedelta):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + expires_delta
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+# app/api/deps.py
+def get_current_user(token: str = Depends(oauth2_scheme)):
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        user_id = payload.get("sub")
+        ...
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Could not validate credentials")
+```
+
+---
+
+## Database migrations (Alembic)
+
+1. Initialize alembic in `app/db/alembic`.
+2. Configure `alembic.ini` to use `DATABASE_URL`.
+3. Create migration: `alembic revision --autogenerate -m "create initial tables"`.
+4. Apply: `alembic upgrade head`.
+
+In dev on Replit, you can use SQLite and skip heavy DB setup for demo.
+
+---
+
+## Observability, Logging & Monitoring
+
+* Structured logging with `loguru` or Python `logging`.
+* Send exceptions to Sentry (optional).
+* Expose health check: `/healthz` for uptime.
+* Basic Prometheus metrics (via `prometheus_client`) for requests, latency, errors.
+
+---
+
+## Testing
+
+* Unit tests with `pytest` for services and models.
+* Integration tests using `TestClient` from FastAPI for endpoints.
+* Mock ML model files in tests to avoid heavy compute.
+
+---
+
+## Deployment on Replit (quick guide)
+
+Replit specifics: configure `requirements.txt`, set run command to use `uvicorn` and set PORT from env.
+
+1. `requirements.txt` (example):
+
+```
+fastapi
+uvicorn[standard]
+sqlalchemy
+alembic
+pydantic
+python-jose[cryptography]
+passlib[bcrypt]
+psycopg2-binary   # optional if using Postgres
+requests
+apscheduler
+scikit-learn
+python-multipart   # for file uploads
+```
+
+2. In Replit UI, set environment variables (Secrets) for `DATABASE_URL`, `SECRET_KEY`, etc.
+
+3. Run command (Replit `.replit` file or Run button):
+
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port $PORT
+```
+
+4. Expose port: Replit sets `$PORT` automatically. If using a database off-Replit (e.g., ElephantSQL) ensure external access allowed.
+
+5. For demonstration, use SQLite: set `DATABASE_URL=sqlite:///./dev.db` and run migrations or let app create tables automatically in dev.
+
+---
+
+## Performance & Production Tips
+
+* Use connection pooling for DB (SQLAlchemy `create_engine(pool_size=...)`).
+* Cache hot queries recommended: Redis for recommendations cache and product lists.
+* Precompute co-purchase / item-similarity offline and store results; serve via fast lookup table.
+* Serve static media (product images) via CDN or Replit’s file hosting (not ideal for production).
+* Use HTTPS + proper CORS.
+
+---
+
+## Postman collection & OpenAPI
+
+* FastAPI exposes OpenAPI spec at `/openapi.json`. Use that to import into Postman.
+* Share API examples / Postman collection with frontend devs.
+
+---
+
+## Checklist for your Replit demo (quick)
+
+* [ ] Add `app/main.py` with `app = FastAPI()` and include routers (auth, products, recommend).
+* [ ] Add `requirements.txt`.
+* [ ] Set environment variables (SECRET_KEY, DATABASE_URL).
+* [ ] Add a simple seed script to insert demo products & test user.
+* [ ] Start server with `uvicorn app.main:app --host 0.0.0.0 --port $PORT`.
+* [ ] Test `/docs` to verify endpoints and try sample flows.
+
+---
+
+## Helpful code snippets to drop in quickly
+
+A minimal `app/main.py` to boot:
+
+```py
+from fastapi import FastAPI
+from app.core.config import settings
+from app.api.v1 import auth, products, recommend
+
+app = FastAPI(title="Sanset API", version="0.1.0")
+
+app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
+app.include_router(products.router, prefix="/api/v1/products", tags=["products"])
+app.include_router(recommend.router, prefix="/api/v1/recommend", tags=["recommend"])
+
+@app.on_event("startup")
+async def startup_event():
+    # init DB, load ML models, warm caches
+    pass
+
+@app.get("/healthz")
+def health():
+    return {"status":"ok"}
+```
+
+---
+
+If you want, I can now:
+
+* generate a **complete `app/main.py` + auth scaffolding + product router** ready to paste into Replit, or
+* produce a **Postman collection** (JSON) for the endpoints above, or
+* provide a small **seed script** that creates 20 demo products and 1 test user.
+
+Which of those would you like me to produce next? (I can generate the code right away.)
