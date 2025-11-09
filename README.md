@@ -2,6 +2,50 @@
 
 **AI-powered e-commerce platform with ML-based recommendations, cart management, and order processing**
 
+---
+
+## ⚡ Quick Start Commands
+
+### Install & Run (One Command)
+```bash
+# Server is already running! Just add sample data:
+python seed_data.py
+```
+
+### Manual Install & Run
+```bash
+# 1. Install dependencies (already done in Replit)
+pip install fastapi uvicorn sqlalchemy psycopg2-binary pydantic pydantic-settings python-jose passlib bcrypt python-multipart email-validator scikit-learn pandas numpy python-dateutil apscheduler
+
+# 2. Start the server
+uvicorn app.main:app --host 0.0.0.0 --port 5000 --reload
+
+# 3. Add sample data (in a new terminal)
+python seed_data.py
+```
+
+### View All Endpoints in One Place
+```bash
+# Open in browser:
+http://localhost:5000/api-endpoints
+
+# Or use curl:
+curl http://localhost:5000/api-endpoints
+```
+
+### Interactive API Documentation
+- **Swagger UI**: http://localhost:5000/docs
+- **ReDoc**: http://localhost:5000/redoc
+- **All Endpoints**: http://localhost:5000/api-endpoints
+
+### Test Credentials (after running seed_data.py)
+```
+Admin: admin@sanset.com / admin123456
+User:  om@example.com / password123
+```
+
+---
+
 ## 🚀 Features
 
 - **Authentication**: JWT-based auth with access & refresh tokens
